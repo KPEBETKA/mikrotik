@@ -1,93 +1,95 @@
 :do {
+    :local lists {
+        {"listname"="antifilter"; "url"="https://antifilter.download/list/allyouneed.lst"}
+        {"listname"="community"; "url"="https://community.antifilter.download/list/community.lst"}
+    }
 
-    :local retryflag true;
-    :local maxretry 3;
-    :local delay 120s;
-    :local url "https://antifilter.download/list/allyouneed.lst";
-    :local listname "list-antifilter";
+    :local maxretry 3
+    :local delay 120
+    :local chunksize 64512
+    :local step ($chunksize - 512)
+    :local regexp "^((25[0-5]|(2[0-4]|[01]?[0-9]?)[0-9])\\.){3}(25[0-5]|(2[0-4]|[01]?[0-9]?)[0-9])(\\/(3[0-2]|[0-2]?[0-9])){0,1}\$"
 
-    :for retry from=1 to=$maxretry step=1 do={
+    :foreach item in=$lists do={
 
-        :if (retryflag) do={
+        :local listname ("list-" . ($item->"listname"))
+        :local url ($item->"url")
 
-            :set $retryflag false;
-            :set $counter 0;
+        :local hostname [:pick $url ([:find $url "//"]+2) [:len $url]]
+        :if ([:typeof [:find $hostname "/"]] != "nil") do={ :set hostname [:pick $hostname 0 [:find $hostname "/"]] }
+        :if ([:typeof [:find $hostname ":"]] != "nil") do={ :set hostname [:pick $hostname 0 [:find $hostname ":"]] }
 
-            :if (retry > 1) do={
-                :delay $delay;
-            };
+        :if ([:len $hostname] > 0) do={
 
-            :do {
-                /ip firewall address-list remove [find where list=($listname."-updated")];
-            } on-error={};
+            :local retryflag true
+            :local counter 0
 
-            :do {
-                /ip firewall address-list add list=($listname."-updated") address=antifilter.download comment="antifilter.download";
-            } on-error={};
+            :for retry from=1 to=$maxretry step=1 do={
+                :if ($retryflag) do={
+                    :set retryflag false
+                    :set counter 0
 
-            :local filesize ([/tool fetch url=$url keep-result=no as-value]->"downloaded");
-            :local chunksize 64512;
-            :local start 0;
-            :local end ($chunksize - 1);
-            :local chunks ($filesize / ($chunksize / 1024));
-            :local lastchunk ($filesize % ($chunksize / 1024));
+                    :if ($retry > 1) do={ :delay $delay }
 
-            :if ($lastchunk > 0) do={
-                :set $chunks ($chunks + 1);
-            };
+                    :do { /ip firewall address-list remove [find where list=($listname."-updated")] } on-error={}
+                    :do {
+                        /ip firewall address-list add list=($listname."-updated") address=$hostname comment=$hostname
+                    } on-error={}
 
-            :for chunk from=1 to=$chunks step=1 do={
+                    :local filesize ([/tool fetch url=$url keep-result=no as-value]->"downloaded")
+                    :local start 0
+                    :local end ($chunksize - 1)
 
-                :local comparesize ([/tool fetch url=$url keep-result=no as-value]->"downloaded");
+                    :while (((($start / 1024) < $filesize) && ($retryflag = false))) do={
+                        :local comparesize ([/tool fetch url=$url keep-result=no as-value]->"downloaded")
+                        :if ($comparesize = $filesize) do={
+                            :local data ""
+                            :set data ([/tool fetch url=$url http-header-field="Range: bytes=$start-$end" output=user as-value]->"data")
 
-                :if ($comparesize = $filesize) do={
-                    :set $data ([:tool fetch url=$url http-header-field="Range: bytes=$start-$end" output=user as-value]->"data");
-                } else={
-                    :set $data [:toarray ""];
-                    :set $retryflag true;
-                };
+                            :if (($start > 0) && ([:len $data] > 0)) do={
+                                :local nl [:find $data "\n"]
+                                :if ([:typeof $nl] != "nil") do={
+                                    :set data [:pick $data ($nl + 1) [:len $data]]
+                                }
+                            }
 
-                :local regexp "^((25[0-5]|(2[0-4]|[01]?[0-9]?)[0-9])\\.){3}(25[0-5]|(2[0-4]|[01]?[0-9]?)[0-9])(\\/(3[0-2]|[0-2]?[0-9])){0,1}\$";
+                            :while ([:len $data] != 0) do={
+                                :local nl [:find $data "\n"]
+                                :local line ""
+                                :if ([:typeof $nl] = "nil") do={
+                                    :set line $data
+                                    :set data ""
+                                } else={
+                                    :set line [:pick $data 0 $nl]
+                                    :set data [:pick $data ($nl + 1) [:len $data]]
+                                }
+                                :if ($line ~ $regexp) do={
+                                    :do {
+                                        /ip firewall address-list add list=($listname."-updated") address=$line
+                                        :set counter ($counter + 1)
+                                    } on-error={}
+                                }
+                            }
+                        } else={
+                            :set retryflag true
+                        }
 
-                :if ($start > 0) do={
-                    :set $data [:pick $data ([:find $data "\n"]+1) [:len $data]];
-                };
-                
-                :while ([:len $data] != 0) do={
-                    :local line [:pick $data 0 [:find $data "\n"]];
+                        :set start ($start + $step)
+                        :set end ($start + $chunksize - 1)
+                    }
+                }
 
-                    :if ( $line ~ $regexp ) do={    
-                        :do {
-                            /ip firewall address-list add list=($listname."-updated") address=$line;
-                            :set $counter ($counter + 1);
-                        } on-error={};        
-                    };
+                :if (($retryflag = false) && ($counter > 0)) do={ :break }
+            }
 
-                    :set $data [:pick $data ([:find $data "\n"]+1) [:len $data]];
-
-                };
-
-                :set $start (($start-512) + $chunksize); 
-                :set $end (($end-512) + $chunksize); 
-            
-            };
-        
-        };
-
-    };
-
-    :if ($counter > 0) do={
-        :do {
-            /ip firewall address-list remove [find where list=$listname];
-        } on-error={};
-
-        :do {
-            :foreach address in=[/ip firewall address-list find list=($listname."-updated")] do={
+            :if (($retryflag = false) && ($counter > 0)) do={
+                :do { /ip firewall address-list remove [find where list=$listname] } on-error={}
                 :do {
-                    /ip firewall address-list set list=$listname $address;
-                } on-error={};
-            };
-        } on-error={};
-    };
-
-} on-error={};
+                    :foreach address in=[/ip firewall address-list find list=($listname."-updated")] do={
+                        :do { /ip firewall address-list set list=$listname $address } on-error={}
+                    }
+                } on-error={}
+            }
+        }
+    }
+} on-error={}
