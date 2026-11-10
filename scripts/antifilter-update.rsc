@@ -2,6 +2,7 @@
     :local lists {
         {"listname"="antifilter"; "url"="https://antifilter.download/list/allyouneed.lst"}
         {"listname"="community"; "url"="https://community.antifilter.download/list/community.lst"}
+        {"listname"="opencck"; "url"="https://iplist.opencck.org/?format=text&data=cidr4&site=...&site=...&site=..."}
     }
 
     :local maxretry 3
@@ -36,46 +37,86 @@
                         /ip firewall address-list add list=($listname."-updated") address=$hostname comment=$hostname
                     } on-error={}
 
-                    :local filesize ([/tool fetch url=$url keep-result=no as-value]->"downloaded")
-                    :local start 0
-                    :local end ($chunksize - 1)
+                    :local rangeOK false
+                    :do {
+                        :local r [/tool fetch url=$url http-header-field="Range: bytes=0-0" output=user as-value]
+                        :local d ($r->"data")
+                        :if ([:len $d] = 1) do={ :set rangeOK true }
+                    } on-error={}
 
-                    :while (((($start / 1024) < $filesize) && ($retryflag = false))) do={
-                        :local comparesize ([/tool fetch url=$url keep-result=no as-value]->"downloaded")
-                        :if ($comparesize = $filesize) do={
-                            :local data ""
-                            :set data ([/tool fetch url=$url http-header-field="Range: bytes=$start-$end" output=user as-value]->"data")
+                    :if ($rangeOK) do={
+                        :local filesize ([/tool fetch url=$url keep-result=no as-value]->"downloaded")
+                        :local start 0
+                        :local end ($chunksize - 1)
 
-                            :if (($start > 0) && ([:len $data] > 0)) do={
-                                :local nl [:find $data "\n"]
-                                :if ([:typeof $nl] != "nil") do={
-                                    :set data [:pick $data ($nl + 1) [:len $data]]
+                        :while (((($start / 1024) < $filesize) && ($retryflag = false))) do={
+                            :local comparesize ([/tool fetch url=$url keep-result=no as-value]->"downloaded")
+                            :if ($comparesize = $filesize) do={
+                                :local data ""
+                                :set data ([/tool fetch url=$url http-header-field="Range: bytes=$start-$end" output=user as-value]->"data")
+
+                                :if (($start > 0) && ([:len $data] > 0)) do={
+                                    :local nl [:find $data "\n"]
+                                    :if ([:typeof $nl] != "nil") do={
+                                        :set data [:pick $data ($nl + 1) [:len $data]]
+                                    }
                                 }
+
+                                :while ([:len $data] != 0) do={
+                                    :local nl [:find $data "\n"]
+                                    :local line ""
+                                    :if ([:typeof $nl] = "nil") do={
+                                        :set line $data
+                                        :set data ""
+                                    } else={
+                                        :set line [:pick $data 0 $nl]
+                                        :set data [:pick $data ($nl + 1) [:len $data]]
+                                    }
+                                    :if ($line ~ $regexp) do={
+                                        :do {
+                                            /ip firewall address-list add list=($listname."-updated") address=$line
+                                            :set counter ($counter + 1)
+                                        } on-error={}
+                                    }
+                                }
+                            } else={
+                                :set retryflag true
                             }
 
-                            :while ([:len $data] != 0) do={
-                                :local nl [:find $data "\n"]
-                                :local line ""
-                                :if ([:typeof $nl] = "nil") do={
-                                    :set line $data
-                                    :set data ""
-                                } else={
-                                    :set line [:pick $data 0 $nl]
-                                    :set data [:pick $data ($nl + 1) [:len $data]]
-                                }
-                                :if ($line ~ $regexp) do={
-                                    :do {
-                                        /ip firewall address-list add list=($listname."-updated") address=$line
-                                        :set counter ($counter + 1)
-                                    } on-error={}
-                                }
-                            }
-                        } else={
+                            :set start ($start + $step)
+                            :set end ($start + $chunksize - 1)
+                        }
+                    } else={
+                        :local data ""
+                        :do {
+                            :set data ([/tool fetch url=$url output=user as-value]->"data")
+                        } on-error={
                             :set retryflag true
                         }
 
-                        :set start ($start + $step)
-                        :set end ($start + $chunksize - 1)
+                        :if ($retryflag = false) do={
+                            :if (([:len $data] > 0) && ([:len $data] < $chunksize)) do={
+                                :while ([:len $data] != 0) do={
+                                    :local nl [:find $data "\n"]
+                                    :local line ""
+                                    :if ([:typeof $nl] = "nil") do={
+                                        :set line $data
+                                        :set data ""
+                                    } else={
+                                        :set line [:pick $data 0 $nl]
+                                        :set data [:pick $data ($nl + 1) [:len $data]]
+                                    }
+                                    :if ($line ~ $regexp) do={
+                                        :do {
+                                            /ip firewall address-list add list=($listname."-updated") address=$line
+                                            :set counter ($counter + 1)
+                                        } on-error={}
+                                    }
+                                }
+                            } else={
+                                :set retryflag true
+                            }
+                        }
                     }
                 }
 
